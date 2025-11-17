@@ -61,7 +61,7 @@ ModuleHeader MOD_HEADER
   = {
 	"extbans/textban",
 	"2.2",
-	"ExtBan ~T (textban) by Syzop",
+	"ExtBan ~textban",
 	"UnrealIRCd Team",
 	"unrealircd-6",
     };
@@ -69,7 +69,7 @@ ModuleHeader MOD_HEADER
 /* Forward declarations */
 const char *extban_modeT_conv_param(BanContext *b, Extban *extban);
 int textban_check_ban(Client *client, Channel *channel, const char *ban, const char **msg, const char **errmsg);
-int textban_can_send_to_channel(Client *client, Channel *channel, Membership *lp, const char **msg, const char **errmsg, SendType sendtype);
+int textban_can_send_to_channel(Client *client, Channel *channel, Membership *lp, const char **msg, const char **errmsg, SendType sendtype, ClientContext *clictx);
 int extban_modeT_is_ok(BanContext *b);
 void parse_word(const char *s, char **word, int *type);
 
@@ -82,13 +82,13 @@ MOD_INIT()
 	memset(&req, 0, sizeof(ExtbanInfo));
 	req.letter = 'T';
 	req.name = "text";
-	req.options = EXTBOPT_NOSTACKCHILD; /* disallow things like ~n:~T, as we only affect text. */
+	req.options = EXTBOPT_NOSTACKCHILD; /* disallow things like ~nick:~text, as we only affect text. */
 	req.conv_param = extban_modeT_conv_param;
 	req.is_ok = extban_modeT_is_ok;
 
 	if (!ExtbanAdd(modinfo->handle, req))
 	{
-		config_error("textban module: adding extban ~T failed! module NOT loaded");
+		config_error("textban module: adding extban ~text failed! module NOT loaded");
 		return MOD_FAILED;
 	}
 
@@ -295,8 +295,8 @@ const char *extban_modeT_conv_param(BanContext *b, Extban *extban)
 
 	strlcpy(para, b->banstr, sizeof(para)); /* work on a copy (and truncate it) */
 
-	/* ~T:<action>:<text>
-	 * ~T:user@host:<action>:<text> if UHOSTFEATURE is enabled
+	/* ~text:<action>:<text>
+	 * ~text:user@host:<action>:<text> if UHOSTFEATURE is enabled
 	 */
 
 #ifdef UHOSTFEATURE
@@ -332,7 +332,7 @@ const char *extban_modeT_conv_param(BanContext *b, Extban *extban)
 	action = para;
 #endif
 
-	/* ~T:<action>:<text> */
+	/* ~text:<action>:<text> */
 	if (!strcasecmp(action, "block"))
 	{
 		action = "block"; /* ok */
@@ -374,7 +374,7 @@ const char *extban_modeT_conv_param(BanContext *b, Extban *extban)
 }
 
 /** Check for text bans (censor and block) */
-int textban_can_send_to_channel(Client *client, Channel *channel, Membership *lp, const char **msg, const char **errmsg, SendType sendtype)
+int textban_can_send_to_channel(Client *client, Channel *channel, Membership *lp, const char **msg, const char **errmsg, SendType sendtype, ClientContext *clictx)
 {
 	Ban *ban;
 

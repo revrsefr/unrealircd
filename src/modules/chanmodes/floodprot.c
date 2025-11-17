@@ -165,7 +165,7 @@ int floodprot_join(Client *client, Channel *channel, MessageTag *mtags);
 EVENT(modef_event);
 int cmodef_channel_create(Channel *channel);
 int cmodef_channel_destroy(Channel *channel, int *should_destroy);
-int floodprot_can_send_to_channel(Client *client, Channel *channel, Membership *lp, const char **msg, const char **errmsg, SendType sendtype);
+int floodprot_can_send_to_channel(Client *client, Channel *channel, Membership *lp, const char **msg, const char **errmsg, SendType sendtype, ClientContext *clictx);
 int floodprot_post_chanmsg(Client *client, Channel *channel, int sendflags, const char *prefix, const char *target, MessageTag *mtags, const char *text, SendType sendtype);
 int floodprot_knock(Client *client, Channel *channel, MessageTag *mtags, const char *comment);
 int floodprot_nickchange(Client *client, MessageTag *mtags, const char *oldnick);
@@ -372,6 +372,7 @@ static void init_config(void)
 	cfg.modef_alternate_action_percentage_threshold = 75; /* 75% */
 	cfg.modef_alternative_ban_action_unsettime = 15; /* 15min */
 	init_default_channel_flood_profiles();
+	safe_strdup(cfg.default_profile, "normal"); // use profile "normal" by default (U6.2.0+)
 }
 
 int floodprot_config_test_set_block(ConfigFile *cf, ConfigEntry *ce, int type, int *errs)
@@ -583,6 +584,9 @@ int floodprot_config_run_antiflood_block(ConfigFile *cf, ConfigEntry *ce, int ty
 		if (!strcmp(ce->name, "default-profile"))
 		{
 			safe_strdup(cfg.default_profile, ce->value);
+			/* Let's handle 'off' in a special way -> becomes NULL */
+			if (!strcmp(cfg.default_profile, "off"))
+				safe_free(cfg.default_profile);
 		} else
 		if (!strcmp(ce->name, "boot-delay"))
 		{
@@ -1288,7 +1292,7 @@ ChannelFloodProtection *get_channel_flood_settings(Channel *channel, int what)
 	return NULL;
 }
 
-int floodprot_can_send_to_channel(Client *client, Channel *channel, Membership *lp, const char **msg, const char **errmsg, SendType sendtype)
+int floodprot_can_send_to_channel(Client *client, Channel *channel, Membership *lp, const char **msg, const char **errmsg, SendType sendtype, ClientContext *clictx)
 {
 	Membership *mb;
 	ChannelFloodProtection *fld;
@@ -1739,8 +1743,10 @@ void do_floodprot_action_standard(Channel *channel, int what, FloodType *floodty
 	/* First the notice to the chanops */
 	mtags = NULL;
 	new_message(&me, NULL, &mtags);
-	ircsnprintf(comment, sizeof(comment), "*** Channel %s detected (limit is %d per %d seconds), setting mode +%c",
-		text, fld->limit[what], fld->per, m);
+	ircsnprintf(comment, sizeof(comment),
+	            "*** Channel %s detected (limit is %d per %d seconds), setting mode +%c. "
+	            "Type \"/MODE %s +F\" to get more information on channel flood protection.",
+	            text, fld->limit[what], fld->per, m, channel->name);
 	ircsnprintf(target, sizeof(target), "%%%s", channel->name);
 	sendto_channel(channel, &me, NULL, "ho",
 		       0, SEND_ALL, mtags,
@@ -2023,6 +2029,15 @@ CMD_OVERRIDE_FUNC(floodprot_override_mode)
 			sendnotice(client, "Plus flood setting via +f: '%s'", buf);
 		}
 		sendnotice(client, "-");
+		if (profile)
+		{
+			if (!(channel->mode.mode & EXTMODE_FLOOD_PROFILE))
+				sendnotice(client, "You are currently using the default anti-flood profile \002%s\002.", profile->profile);
+			else
+				sendnotice(client, "You are currently using the anti-flood profile \002%s\002.", profile->profile);
+			sendnotice(client, "If you want to change to a different anti-flood profile, for example because flood protection is kicking in too quickly");
+			sendnotice(client, "or too late, then you can use \002MODE %s +F <profile>\002. See the list of profiles below (ordered from lax to strict).", channel->name);
+		}
 		floodprot_show_profiles(client);
 		return;
 	}

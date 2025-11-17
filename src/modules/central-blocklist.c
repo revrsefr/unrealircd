@@ -8,7 +8,7 @@
 ModuleHeader MOD_HEADER
   = {
 	"central-blocklist",
-	"1.0.7",
+	"1.0.8",
 	"Check users at central blocklist",
 	"UnrealIRCd Team",
 	"unrealircd-6",
@@ -20,7 +20,10 @@ Module *cbl_module = NULL;
 #define CBL_URL	 "https://centralblocklist.unrealircd-api.org/api/v1"
 #define SPAMREPORT_URL	"https://spamreport.unrealircd-api.org/api/spamreport-v1"
 #define CBL_TRANSFER_TIMEOUT 10
-#define SPAMREPORT_NUM_REMEMBERED_CMDS 10
+#define SPAMREPORT_NUM_REMEMBERED_CMDS 20
+
+#define WEB(client)		((WebRequest *)moddata_local_client(client, webserver_md).ptr)
+#define WSU(client)		((WebSocketUser *)moddata_client(client, websocket_md).ptr)
 
 typedef struct CBLUser CBLUser;
 struct CBLUser
@@ -31,6 +34,7 @@ struct CBLUser
 	char allowed_in;
 	int last_cmds_slot;
 	char *last_cmds[SPAMREPORT_NUM_REMEMBERED_CMDS];
+	TextAnalysis last_cmds_textanalysis[SPAMREPORT_NUM_REMEMBERED_CMDS];
 };
 
 /* For tracking current HTTPS requests */
@@ -70,6 +74,8 @@ struct reqstruct {
 static struct reqstruct req;
 
 CBLTransfer *cbltransfers = NULL;
+ModDataInfo *webserver_md = NULL; /* (external module, looked up) */
+ModDataInfo *websocket_md = NULL; /* (external module, looked up) */
 
 /* Forward declarations */
 int _central_spamreport(Client *client, Client *by, const char *url);
@@ -244,7 +250,10 @@ MOD_LOAD()
 
 	do_command_overrides(modinfo);
 
-	/* Enable gathering of "last 10 lines" for SPAMREPORT, only if SPAMREPORT is enabled: */
+	webserver_md = findmoddata_byname("web", MODDATATYPE_LOCAL_CLIENT);
+	websocket_md = findmoddata_byname("websocket", MODDATATYPE_CLIENT);
+
+	/* Enable gathering of "last 20 lines" for SPAMREPORT, only if SPAMREPORT is enabled: */
 	if (central_spamreport_enabled())
 	{
 		CommandOverrideAdd(modinfo->handle, "NICK", -2, cbl_override_spamreport_gather);
@@ -561,6 +570,7 @@ void cbl_add_client_info(Client *client)
 	json_t *cbl = CBL(client)->handshake;
 	json_t *child = json_object();
 	const char *str;
+	int i;
 
 	json_object_set_new(cbl, "client", child);
 
@@ -598,10 +608,10 @@ void cbl_add_client_info(Client *client)
 		json_object_set_new(child, "details", json_string_unreal(client->name));
 	}
 
-	if (client->local && client->local->listener)
-		json_object_set_new(child, "server_port", json_integer(client->local->listener->port));
-	if (client->local && client->local->port)
-		json_object_set_new(child, "client_port", json_integer(client->local->port));
+	if ((i = get_server_port(client)))
+		json_object_set_new(child, "server_port", json_integer(i));
+	if ((i = get_client_port(client)))
+		json_object_set_new(child, "client_port", json_integer(i));
 
 	if (client->user)
 	{
@@ -615,6 +625,28 @@ void cbl_add_client_info(Client *client)
 		if (!BadPtr(client->info))
 			json_object_set_new(user, "realname", json_string_unreal(client->info));
 		json_object_set_new(user, "reputation", json_integer(GetReputation(client)));
+	}
+
+	if (webserver_md && WEB(client))
+	{
+		json_t *web = json_object();
+		json_t *headers = json_object();
+		NameValuePrioList *nv;
+		json_object_set_new(child, "web", web);
+		json_object_set_new(web, "headers", headers);
+		for (nv = WEB(client)->headers; nv; nv = nv->next)
+			json_object_set_new(headers, nv->name, json_string_unreal(nv->value));
+	}
+
+	if (websocket_md && WSU(client))
+	{
+		json_t *websocket = json_object();
+		json_object_set_new(child, "websocket", websocket);
+
+		if (WSU(client)->type == WEBSOCKET_TYPE_TEXT)
+			json_object_set_new(websocket, "protocol", json_string_unreal("text"));
+		else if (WSU(client)->type == WEBSOCKET_TYPE_BINARY)
+			json_object_set_new(websocket, "protocol", json_string_unreal("binary"));
 	}
 
 	if ((str = moddata_client_get(client, "tls_cipher")))
@@ -892,10 +924,12 @@ void cbl_download_complete(OutgoingWebRequest *request, OutgoingWebResponse *res
 
 	if (response->errorbuf || !response->memory)
 	{
+		char buf[512];
 		unreal_log(ULOG_DEBUG, "central-blocklist", "DEBUG_CENTRAL_BLOCKLIST", NULL,
 		           "CBL ERROR: $error",
 		           log_data_string("error", response->errorbuf ? response->errorbuf : "No data returned"));
-		cbl_error_response(transfer, "error contacting CBL");
+		snprintf(buf, sizeof(buf), "error contacting CBL: %s", response->errorbuf ? response->errorbuf : "No data returned");
+		cbl_error_response(transfer, buf);
 		return;
 	}
 
@@ -1035,6 +1069,9 @@ void send_request_for_pending_clients(void)
 	//w->callback = cbl_download_complete;
 	safe_strdup(w->apicallback, "cbl_download_complete");
 	w->callback_data = c;
+#ifdef TLS1_3_VERSION
+	w->minimum_tls_version = TLS1_3_VERSION;
+#endif
 	url_start_async(w);
 }
 
@@ -1072,7 +1109,14 @@ CMD_OVERRIDE_FUNC(cbl_override_spamreport_gather)
 		}
 		if (record_cmd)
 		{
-			safe_strdup(CBL(client)->last_cmds[CBL(client)->last_cmds_slot], backupbuf);
+			int slot = CBL(client)->last_cmds_slot; // just for readability below
+			safe_strdup(CBL(client)->last_cmds[slot], backupbuf);
+			if (clictx && clictx->textanalysis)
+			{
+				memcpy(&CBL(client)->last_cmds_textanalysis[slot], clictx->textanalysis, sizeof(TextAnalysis));
+			} else {
+				memset(&CBL(client)->last_cmds_textanalysis[slot], 0, sizeof(TextAnalysis));
+			}
 			CBL(client)->last_cmds_slot++;
 			if (CBL(client)->last_cmds_slot >= SPAMREPORT_NUM_REMEMBERED_CMDS)
 				CBL(client)->last_cmds_slot = 0;
@@ -1092,6 +1136,9 @@ int _central_spamreport(Client *client, Client *by, const char *url)
 	int i, start;
 	char number[16];
 	int cnt = 0;
+
+	if (!client)
+		return 0; /* We only support reporting clients, not clientless IP addresses */
 
 	if (!MyUser(client) || !CBL(client))
 		return 0; /* Only possible if hot-loading */
@@ -1123,9 +1170,12 @@ int _central_spamreport(Client *client, Client *by, const char *url)
 	{
 		if (CBL(client)->last_cmds[i])
 		{
+			// WARNING: duplicate code #1 of #2
 			snprintf(number, sizeof(number), "%d", ++cnt);
 			item = json_object();
 			json_object_set_new(item, "raw", json_string_unreal(CBL(client)->last_cmds[i]));
+			if (CBL(client)->last_cmds_textanalysis[i].num_bytes)
+				json_expand_textanalysis(item, "textanalysis", &CBL(client)->last_cmds_textanalysis[i], 2);
 			json_object_set_new(cmds, number, item);
 		}
 	}
@@ -1133,9 +1183,12 @@ int _central_spamreport(Client *client, Client *by, const char *url)
 	{
 		if (CBL(client)->last_cmds[i])
 		{
+			// WARNING: duplicate code #2 of #2
 			snprintf(number, sizeof(number), "%d", ++cnt);
 			item = json_object();
 			json_object_set_new(item, "raw", json_string_unreal(CBL(client)->last_cmds[i]));
+			if (CBL(client)->last_cmds_textanalysis[i].num_bytes)
+				json_expand_textanalysis(item, "textanalysis", &CBL(client)->last_cmds_textanalysis[i], 2);
 			json_object_set_new(cmds, number, item);
 		}
 	}
@@ -1160,6 +1213,9 @@ int _central_spamreport(Client *client, Client *by, const char *url)
 	w->headers = headers;
 	w->max_redirects = 1;
 	w->callback = download_complete_dontcare;
+#ifdef TLS1_3_VERSION
+	w->minimum_tls_version = TLS1_3_VERSION;
+#endif
 	url_start_async(w);
 	return 1;
 }

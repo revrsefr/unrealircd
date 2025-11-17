@@ -6,7 +6,7 @@
 
 [Setup]
 AppName=UnrealIRCd 6
-AppVerName=UnrealIRCd 6.1.10-git
+AppVerName=UnrealIRCd 6.2.2-git
 AppPublisher=UnrealIRCd Team
 AppPublisherURL=https://www.unrealircd.org
 AppSupportURL=https://www.unrealircd.org
@@ -66,8 +66,8 @@ Source: "c:\dev\unrealircd-6-libs\argon2\vs2015\build\*.dll"; DestDir: "{app}\bi
 Source: "c:\dev\unrealircd-6-libs\libsodium\bin\x64\Release\v142\dynamic\*.dll"; DestDir: "{app}\bin"; Flags: ignoreversion signonce
 Source: "c:\dev\unrealircd-6-libs\jansson\bin\*.dll"; DestDir: "{app}\bin"; Flags: ignoreversion signonce
 Source: "c:\dev\unrealircd-6-libs\c-ares\msvc\cares\dll-release\cares.dll"; DestDir: "{app}\bin"; Flags: ignoreversion signonce
-Source: "c:\dev\unrealircd-6-libs\libressl\bin\openssl.exe"; DestDir: "{app}\bin"; Flags: ignoreversion signonce
-Source: "c:\dev\unrealircd-6-libs\libressl\bin\*.dll"; DestDir: "{app}\bin"; Flags: ignoreversion signonce
+Source: "c:\dev\unrealircd-6-libs\openssl\bin\openssl.exe"; DestDir: "{app}\bin"; Flags: ignoreversion signonce
+Source: "c:\dev\unrealircd-6-libs\openssl\bin\*.dll"; DestDir: "{app}\bin"; Flags: ignoreversion signonce
 Source: "c:\dev\unrealircd-6-libs\GeoIP\libGeoIP\*.dll"; DestDir: "{app}\bin"; Flags: ignoreversion signonce
 Source: "c:\dev\unrealircd-6-libs\setacl.exe"; DestDir: "{app}\tmp"; Flags: ignoreversion signonce
 #ifdef USE_CURL

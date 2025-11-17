@@ -264,6 +264,8 @@ static void parse2(Client *cptr, Client **fromptr, MessageTag *mtags, int mtags_
 	int retval;
 #endif
 	RealCommand *cmptr = NULL;
+	ClientContext clictx;
+	TextAnalysis text_analysis_storage;
 	int bytes;
 
 	*fromptr = cptr; /* The default, unless a source is specified (and permitted) */
@@ -552,27 +554,37 @@ static void parse2(Client *cptr, Client **fromptr, MessageTag *mtags, int mtags_
 	if (IsUser(cptr) && (cmptr->flags & CMD_RESETIDLE))
 		cptr->local->idle_since = TStime();
 
+	/* Create client context */
+	memset(&clictx, 0, sizeof(clictx));
+	clictx.cmd = cmptr;
+	if ((cmptr->flags & CMD_TEXTANALYSIS) && MyUser(from) && (i>1))
+	{
+		memset(&text_analysis_storage, 0, sizeof(text_analysis_storage));
+		clictx.textanalysis = &text_analysis_storage;
+		RunHook(HOOKTYPE_ANALYZE_TEXT, from, para[i-1], clictx.textanalysis);
+	}
+
 	/* Now ready to execute the command */
 #ifndef DEBUGMODE
 	if (cmptr->flags & CMD_ALIAS)
 	{
-		(*cmptr->aliasfunc) (from, mtags, i, (const char **)para, cmptr->cmd);
+		(*cmptr->aliasfunc) (&clictx, from, mtags, i, (const char **)para, cmptr->cmd);
 	} else {
 		if (!cmptr->overriders)
-			(*cmptr->func) (from, mtags, i, (const char **)para);
+			(*cmptr->func) (&clictx, from, mtags, i, (const char **)para);
 		else
-			(*cmptr->overriders->func) (cmptr->overriders, from, mtags, i, (const char **)para);
+			(*cmptr->overriders->func) (cmptr->overriders, &clictx, from, mtags, i, (const char **)para);
 	}
 #else
 	then = clock();
 	if (cmptr->flags & CMD_ALIAS)
 	{
-		(*cmptr->aliasfunc) (from, mtags, i, (const char **)para, cmptr->cmd);
+		(*cmptr->aliasfunc) (&clictx, from, mtags, i, (const char **)para, cmptr->cmd);
 	} else {
 		if (!cmptr->overriders)
-			(*cmptr->func) (from, mtags, i, (const char **)para);
+			(*cmptr->func) (&clictx, from, mtags, i, (const char **)para);
 		else
-			(*cmptr->overriders->func) (cmptr->overriders, from, mtags, i, (const char **)para);
+			(*cmptr->overriders->func) (cmptr->overriders, &clictx, from, mtags, i, (const char **)para);
 	}
 	if (!IsDead(cptr))
 	{
@@ -626,14 +638,13 @@ static void ban_handshake_data_flooder(Client *client)
  */
 void parse_addlag(Client *client, int command_bytes, int mtags_bytes)
 {
-	FloodSettings *settings = get_floodsettings_for_user(client, FLD_LAG_PENALTY);
-
 	if (!IsServer(client) && !IsNoFakeLag(client) &&
 #ifdef FAKELAG_CONFIGURABLE
 	    !(client->local->class && (client->local->class->options & CLASS_OPT_NOFAKELAG)) &&
 #endif
 	    !ValidatePermissionsForPath("immune:lag",client,NULL,NULL,NULL))
 	{
+		FloodSettings *settings = get_floodsettings_for_user(client, FLD_LAG_PENALTY);
 		int lag_penalty = settings->period[FLD_LAG_PENALTY];
 		int lag_penalty_bytes = settings->limit[FLD_LAG_PENALTY];
 
@@ -708,7 +719,7 @@ static int do_numeric(int numeric, Client *client, MessageTag *recv_mtags, int p
 		/* STARTTLS: unknown command */
 		if ((numeric == 451) && (parc > 2) && strstr(parv[1], "STARTTLS"))
 		{
-			if (client->server->conf && (client->server->conf->outgoing.options & CONNECT_INSECURE))
+			if (client->server->conf && (client->server->conf->outgoing.options & CONNECT_OUTGOING_INSECURE))
 				start_server_handshake(client);
 			else
 				reject_insecure_server(client);

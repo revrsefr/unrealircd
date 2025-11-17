@@ -273,6 +273,45 @@ const char *myctime(time_t value)
 	return buf;
 }
 
+/** Return the server port the client connected to (e.g. 6697) */
+int get_server_port(Client *client)
+{
+	ModData *m;
+
+	if (MyConnect(client) && client->local->listener)
+		return client->local->listener->port;
+
+	m = moddata_client_get_raw(client, "server_port");
+	if (!m)
+		return 0;
+	return m->i;
+}
+
+/** Return the client-side port (e.g. 60123) for the 'client' connection.
+ * Note: don't confuse this with the server-side port (e.g. 6697).
+ */
+int get_client_port(Client *client)
+{
+	ModData *m = moddata_client_get_raw(client, "local_port");
+	if (!m)
+		return 0;
+	return m->i;
+}
+
+void set_client_port(Client *client, int port)
+{
+	char buf[32];
+	snprintf(buf, sizeof(buf), "%d", port);
+	moddata_client_set(client, "local_port", buf);
+}
+
+void set_server_port(Client *client, int port)
+{
+	char buf[32];
+	snprintf(buf, sizeof(buf), "%d", port);
+	moddata_client_set(client, "server_port", buf);
+}
+
 /*
 ** get_client_name
 **      Return the name of the client for various tracking and
@@ -304,13 +343,13 @@ const char *get_client_name(Client *client, int showip)
 	if (MyConnect(client))
 	{
 		if (showip)
-			ircsnprintf(nbuf, sizeof(nbuf), "%s[%s@%s.%u]",
+		{
+			ircsnprintf(nbuf, sizeof(nbuf), "%s[%s@%s.%d]",
 			    client->name,
 			    IsIdentSuccess(client) ? client->ident : "",
 			    client->ip ? client->ip : "???",
-			    (unsigned int)client->local->port);
-		else
-		{
+			    get_client_port(client));
+		} else {
 			if (mycmp(client->name, client->local->sockhost))
 				ircsnprintf(nbuf, sizeof(nbuf), "%s[%s]",
 				    client->name, client->local->sockhost);
@@ -988,6 +1027,20 @@ const char *cmdname_by_spamftarget(int target)
 	return "???";
 }
 
+/** Convert the value for set::spamfilter::show-message-content-on-hit
+ * and spamfilter::show-message-content-on-hit.
+ */
+SpamfilterShowMessageContentOnHit spamfilter_show_message_content_on_hit_strtoval(const char *s)
+{
+	if (!strcmp(s, "always"))
+		return SPAMFILTER_SHOW_MESSAGE_CONTENT_ON_HIT_ALWAYS;
+	if (!strcmp(s, "channel-only"))
+		return SPAMFILTER_SHOW_MESSAGE_CONTENT_ON_HIT_CHANNEL_ONLY;
+	if (!strcmp(s, "never"))
+		return SPAMFILTER_SHOW_MESSAGE_CONTENT_ON_HIT_NEVER;
+	return 0;
+}
+
 /** Add name entries from config */
 void unreal_add_names(NameList **n, ConfigEntry *ce)
 {
@@ -1522,6 +1575,21 @@ int decode_authenticate_plain_default_handler(const char *param, char **authoriz
 	return 0;
 }
 
+char *utf8_convert_confusables_default_handler(const char *i, char *obuf, int olen)
+{
+	strlcpy(obuf, i, olen);
+	return obuf;
+}
+
+const char *utf8_get_block_name_default_handler(int i)
+{
+	return NULL;
+}
+
+int utf8_get_block_number_default_handler(const char *name)
+{
+	return -1;
+}
 
 /** my_timegm: mktime()-like function which will use GMT/UTC.
  * Strangely enough there is no standard function for this.
@@ -1834,7 +1902,17 @@ void DoMD5(char *mdout, const char *src, unsigned long n)
 {
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
 	unsigned int md_len;
-	EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+	EVP_MD_CTX *mdctx;
+
+	if (!md5_function)
+	{
+		unreal_log(ULOG_FATAL, "tls", "MD5_UNAVAILABLE_FATAL", NULL,
+		           "DoMD5() was called but the MD5 algorithm is not available "
+		           "in your OpenSSL/LibreSSL version. -- ABORTING");
+		abort();
+	}
+
+	mdctx = EVP_MD_CTX_new();
 	if (EVP_DigestInit_ex(mdctx, md5_function, NULL) != 1)
 		abort();
 	EVP_DigestUpdate(mdctx, src, n);
@@ -1877,12 +1955,13 @@ void sha256hash_binary(char *dst, const char *src, unsigned long n)
 {
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
 	unsigned int md_len;
-	EVP_MD_CTX *mdctx = EVP_MD_CTX_new();
+	static EVP_MD_CTX *mdctx = NULL;
+	if (!mdctx)
+		mdctx = EVP_MD_CTX_new();
 	if (EVP_DigestInit_ex(mdctx, sha256_function, NULL) != 1)
 		abort();
 	EVP_DigestUpdate(mdctx, src, n);
 	EVP_DigestFinal_ex(mdctx, dst, &md_len);
-	EVP_MD_CTX_free(mdctx);
 #else
 	SHA256_CTX hash;
 
@@ -2750,6 +2829,36 @@ const char *StripControlCodes(const char *text)
 	return StripControlCodesEx(text, new_str, sizeof(new_str), 0);
 }
 
+/** Check if string is valid UTF8 and contains no low ASCII (0-31) */
+int valid_text(const char *str)
+{
+	const char *p;
+
+	if (!unrl_utf8_validate(str, NULL))
+		return 0;
+
+	for (p = str; *p; p++)
+		if (*p < 32)
+			return 0;
+
+	return 1;
+}
+
+/** Check if string is valid UTF8 and contains no space (ASCII 32) or low ASCII (<32) */
+int valid_text_nospaces(const char *str)
+{
+	const char *p;
+
+	if (!unrl_utf8_validate(str, NULL))
+		return 0;
+
+	for (p = str; *p; p++)
+		if (*p < 33)
+			return 0;
+
+	return 1;
+}
+
 const char *command_issued_by_rpc(MessageTag *mtags)
 {
 	MessageTag *m = find_mtag(mtags, "unrealircd.org/issued-by");
@@ -2831,6 +2940,7 @@ OutgoingWebRequest *duplicate_outgoingwebrequest(OutgoingWebRequest *orig)
 	e->keep_file = orig->keep_file;
 	e->connect_timeout = orig->connect_timeout;
 	e->transfer_timeout = orig->transfer_timeout;
+	e->minimum_tls_version = orig->minimum_tls_version;
 	return e;
 }
 

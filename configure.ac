@@ -7,7 +7,7 @@ dnl src/windows/unrealinst.iss
 dnl doc/Config.header
 dnl src/version.c.SH
 
-AC_INIT([unrealircd], [6.1.10-git], [https://bugs.unrealircd.org/], [], [https://unrealircd.org/])
+AC_INIT([unrealircd], [6.2.2-git], [https://bugs.unrealircd.org/], [], [https://unrealircd.org/])
 AC_CONFIG_SRCDIR([src/ircd.c])
 AC_CONFIG_HEADER([include/setup.h])
 AC_CONFIG_AUX_DIR([autoconf])
@@ -30,11 +30,11 @@ UNREAL_VERSION_GENERATION=["6"]
 AC_DEFINE_UNQUOTED([UNREAL_VERSION_GENERATION], [$UNREAL_VERSION_GENERATION], [Generation version number (e.g.: X for X.Y.Z)])
 
 # Major version number (e.g.: Y in X.Y.Z)
-UNREAL_VERSION_MAJOR=["1"]
+UNREAL_VERSION_MAJOR=["2"]
 AC_DEFINE_UNQUOTED([UNREAL_VERSION_MAJOR], [$UNREAL_VERSION_MAJOR], [Major version number (e.g.: Y for X.Y.Z)])
 
 # Minor version number (e.g.: Z in X.Y.Z)
-UNREAL_VERSION_MINOR=["10"]
+UNREAL_VERSION_MINOR=["2"]
 AC_DEFINE_UNQUOTED([UNREAL_VERSION_MINOR], [$UNREAL_VERSION_MINOR], [Minor version number (e.g.: Z for X.Y.Z)])
 
 # The version suffix such as a beta marker or release candidate
@@ -259,6 +259,9 @@ check_cc_flag([-Wempty-body], [CFLAGS="$CFLAGS -Wno-empty-body"])
 
 dnl This warns about all our hook calls - RunHook() and others
 check_cc_flag([-Wdeprecated-non-prototype], [CFLAGS="$CFLAGS -Wno-deprecated-non-prototype"])
+
+dnl This warns about const char hexchars[16] = "0123456789abcdef";
+check_cc_flag([-Wunterminated-string-initialization], [CFLAGS="$CFLAGS -Wno-unterminated-string-initialization"])
 
 dnl Yeah this old clang version is a bit problematic
 dnl (ships in Ubuntu 16.04 for example)
@@ -573,7 +576,10 @@ AC_ARG_WITH(system-sodium, [AS_HELP_STRING([--without-system-sodium], [Use bundl
 AC_ARG_WITH(system-cares, [AS_HELP_STRING([--without-system-cares], [Use bundled version instead of system c-ares. Normally autodetected via pkg-config.])], [], [with_system_cares=yes])
 AC_ARG_WITH(system-jansson, [AS_HELP_STRING([--without-system-jansson], [Use bundled version instead of system jansson. Normally autodetected via pkg-config.])], [], [with_system_jansson=yes])
 CHECK_SSL
+CHECK_SSL_CTX_SET1_SIGALGS_LIST
 CHECK_SSL_CTX_SET1_CURVES_LIST
+CHECK_SSL_CTX_SET1_GROUPS_LIST
+CHECK_SSL_GET_NEGOTIATED_GROUP
 CHECK_SSL_CTX_SET_MIN_PROTO_VERSION
 CHECK_SSL_CTX_SET_SECURITY_LEVEL
 CHECK_ASN1_TIME_diff
@@ -617,7 +623,7 @@ AS_IF([test "x$PRIVATELIBDIR" != "x"], [rm -f "$PRIVATELIBDIR/"libpcre2*])],[has
 
 AS_IF([test "$has_system_pcre2" = "no"], [
 dnl REMEMBER TO CHANGE WITH A NEW PCRE2 RELEASE!
-pcre2_version="10.44"
+pcre2_version="10.45"
 AC_MSG_RESULT(extracting PCRE2 regex library)
 cur_dir=`pwd`
 cd extras
@@ -634,7 +640,11 @@ else
 fi
 AC_MSG_RESULT(configuring PCRE2 regex library)
 cd pcre2-$pcre2_version
+save_cflags="$CFLAGS"
+CFLAGS="$orig_cflags"
+export CFLAGS
 ./configure --enable-jit --enable-shared --prefix=$cur_dir/extras/pcre2 --libdir=$PRIVATELIBDIR || exit 1
+CFLAGS="$save_cflags"
 AC_MSG_RESULT(compiling PCRE2 regex library)
 $ac_cv_prog_MAKER || exit 1
 AC_MSG_RESULT(installing PCRE2 regex library)
@@ -757,7 +767,7 @@ AS_IF([test "x$PRIVATELIBDIR" != "x"], [rm -f "$PRIVATELIBDIR/"libcares*])],[has
 
 AS_IF([test "$has_system_cares" = "no"], [
 dnl REMEMBER TO CHANGE WITH A NEW C-ARES RELEASE!
-cares_version="1.34.3"
+cares_version="1.34.5"
 AC_MSG_RESULT(extracting c-ares resolver library)
 cur_dir=`pwd`
 cd extras
@@ -832,7 +842,7 @@ AS_IF([test "x$PRIVATELIBDIR" != "x"], [rm -f "$PRIVATELIBDIR/"libjansson*])],[h
 
 AS_IF([test "$has_system_jansson" = "no"],[
 dnl REMEMBER TO CHANGE WITH A NEW JANSSON RELEASE!
-jansson_version="2.14"
+jansson_version="2.14.1"
 AC_MSG_RESULT(extracting jansson library)
 cur_dir=`pwd`
 cd extras
@@ -886,6 +896,25 @@ CHECK_LIBMAXMINDDB
 
 UNRLINCDIR="`pwd`/include"
 
+dnl This is at the end so the (potential) -std=gnu17 is not used
+dnl when compiling libraries, as their requirements may be different.
+AC_MSG_CHECKING([if explicit -std=gnu17 is needed])
+AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
+	[[#include <sys/types.h>
+	  #include <stdlib.h>
+	  #include <sys/socket.h>
+	  #include <netinet/in.h>
+	  #include <netinet/tcp.h>
+	  #include <sys/socket.h>]],
+	[[
+	  void (*test)();
+	  test = exit;
+	  test(0);
+	]])],
+	[AC_MSG_RESULT(no)],
+	[CFLAGS="$CFLAGS -std=gnu17"
+	AC_MSG_RESULT(yes)])
+
 dnl Moved to the very end to ensure it doesn't affect any libs or tests.
 if test "$ac_cv_werror" = "yes" ; then
 	CFLAGS="$CFLAGS -Werror"
@@ -893,7 +922,7 @@ fi
 
 dnl Address sanitizer build
 if test "$ac_cv_asan" = "yes" ; then
-	CFLAGS="$CFLAGS -O2 -fno-inline -fsanitize=address -fno-omit-frame-pointer -DNOCLOSEFD"
+	CFLAGS="$CFLAGS -O2 -fno-inline -fsanitize=address,undefined -fno-omit-frame-pointer -DNOCLOSEFD"
 	IRCDLIBS="-fsanitize=address $IRCDLIBS"
 fi
 

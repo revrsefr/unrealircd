@@ -123,6 +123,7 @@ struct Umode {
 	Module *owner; /**< Module that owns this user mode */
 };
 
+#define HIGHESTMODDATATYPE 7
 typedef enum ModDataType {
 	MODDATATYPE_LOCAL_VARIABLE	= 1,
 	MODDATATYPE_GLOBAL_VARIABLE	= 2,
@@ -131,6 +132,10 @@ typedef enum ModDataType {
 	MODDATATYPE_CHANNEL		= 5,
 	MODDATATYPE_MEMBER		= 6,
 	MODDATATYPE_MEMBERSHIP		= 7,
+	/* If you add more here, then 1) increase MODDATATYPES,
+	 * 2) in src/api-moddata.c update moddatatypelimits[],
+	 * 3) add a lot of code at other places in src/api-moddata.c.
+	 */
 } ModDataType;
 
 typedef enum ModDataSync {
@@ -142,6 +147,7 @@ typedef struct ModDataInfo ModDataInfo;
 
 struct ModDataInfo {
 	ModDataInfo *prev, *next;
+	int priority; /**< For sorting purposes (ones with most key lookups should go first) */
 	char *name; /**< Name for this moddata */
 	Module *owner; /**< Owner of this moddata */
 	ModDataType type; /**< Type of module data (eg: for client, channel, etc..) */
@@ -998,12 +1004,12 @@ extern void CommandDelX(Command *command, RealCommand *cmd);
 extern int CommandExists(const char *name);
 extern CommandOverride *CommandOverrideAdd(Module *module, const char *name, int priority, OverrideCmdFunc func);
 extern void CommandOverrideDel(CommandOverride *ovr);
-extern void CallCommandOverride(CommandOverride *ovr, Client *client, MessageTag *mtags, int parc, const char *parv[]);
+extern void CallCommandOverride(CommandOverride *ovr, ClientContext *clictx, Client *client, MessageTag *mtags, int parc, const char *parv[]);
 /** Call next command override function - easy way to do it.
  * This way you don't have to call CallCommandOverride() with the right arguments.
  * Which is nice because command (override) arguments may change in future UnrealIRCd versions.
  */
-#define CALL_NEXT_COMMAND_OVERRIDE()	CallCommandOverride(ovr, client, recv_mtags, parc, parv)
+#define CALL_NEXT_COMMAND_OVERRIDE()	CallCommandOverride(ovr, clictx, client, recv_mtags, parc, parv)
 
 extern void moddata_free_client(Client *acptr);
 extern void moddata_free_local_client(Client *acptr);
@@ -1214,8 +1220,6 @@ extern APICallback *APICallbackAdd(Module *module, APICallback *mreq);
 #define HOOKTYPE_FREE_USER	74
 /** See hooktype_can_join_limitexceeded() */
 #define HOOKTYPE_CAN_JOIN_LIMITEXCEEDED	75
-/** See hooktype_visible_in_channel() */
-#define HOOKTYPE_VISIBLE_IN_CHANNEL	76
 /** See hooktype_see_channel_in_whois() */
 #define HOOKTYPE_SEE_CHANNEL_IN_WHOIS	77
 /** See hooktype_join_data() */
@@ -1310,6 +1314,17 @@ extern APICallback *APICallbackAdd(Module *module, APICallback *mreq);
 #define HOOKTYPE_SASL_AUTHENTICATE	124
 /** See hooktype_sasl_mechs */
 #define HOOKTYPE_SASL_MECHS		125
+/* See hooktype_allow_client */
+#define HOOKTYPE_ALLOW_CLIENT	126
+/** See hooktype_analyze_text */
+#define HOOKTYPE_ANALYZE_TEXT	127
+/** See hooktype_can_use_nick */
+#define HOOKTYPE_CAN_USE_NICK	128
+/** See hooktype_banned_client */
+#define HOOKTYPE_BANNED_CLIENT 129
+/** See hooktype_motd */
+#define HOOKTYPE_MOTD 130
+
 
 /* Adding a new hook here?
  * 1) Add the #define HOOKTYPE_.... with a new number
@@ -1522,7 +1537,7 @@ int hooktype_local_kick(Client *client, Client *victim, Channel *channel, Messag
 int hooktype_remote_kick(Client *client, Client *victim, Channel *channel, MessageTag *mtags, const char *comment);
 
 /** Called right before a message is sent to the channel (function prototype for HOOKTYPE_PRE_CHANMSG).
- * This function is only used by delayjoin. It cannot block a message. See hooktype_can_send_to_user() instead!
+ * This function is only used by delayjoin. It cannot block a message. See hooktype_can_send_to_channel() instead!
  * @param client		The client
  * @param channel		The channel
  * @param mtags         	Message tags associated with the event (pointer-to-pointer)
@@ -1540,7 +1555,7 @@ int hooktype_pre_chanmsg(Client *client, Channel *channel, MessageTag **mtags, c
  * @retval HOOK_DENY		Deny the message. The 'errmsg' will be sent to the user.
  * @retval HOOK_CONTINUE	Allow the message, unless other modules block it.
  */
-int hooktype_can_send_to_user(Client *client, Client *target, const char **text, const char **errmsg, SendType sendtype);
+int hooktype_can_send_to_user(Client *client, Client *target, const char **text, const char **errmsg, SendType sendtype, ClientContext *clictx);
 
 /** Called when a user wants to send a message to a channel (function prototype for HOOKTYPE_CAN_SEND_TO_CHANNEL).
  * @param client		The sender
@@ -1552,7 +1567,7 @@ int hooktype_can_send_to_user(Client *client, Client *target, const char **text,
  * @retval HOOK_DENY		Deny the message. The 'errmsg' will be sent to the user.
  * @retval HOOK_CONTINUE	Allow the message, unless other modules block it.
  */
-int hooktype_can_send_to_channel(Client *client, Channel *channel, Membership *member, const char **text, const char **errmsg, SendType sendtype);
+int hooktype_can_send_to_channel(Client *client, Channel *channel, Membership *member, const char **text, const char **errmsg, SendType sendtype, ClientContext *clictx);
 
 /** Called when a message is sent from one user to another user (function prototype for HOOKTYPE_USERMSG).
  * @param client		The sender
@@ -1996,16 +2011,6 @@ int hooktype_free_user(Client *client);
  */
 int hooktype_can_join_limitexceeded(Client *client, Channel *channel, const char *key, char **errmsg);
 
-/** Called to check if the user is visible in the channel (function prototype for HOOKTYPE_VISIBLE_IN_CHANNEL).
- * For example, the delayjoin module (+d/+D) will 'return 0' here if the user is hidden due to delayed join.
- * @param client		The client
- * @param channel		The channel
- * @param client_member		The client Member * struct in the channel
- * @retval 0 The user is NOT visible
- * @retval 1 The user is visible
- */
-int hooktype_visible_in_channel(Client *client, Channel *channel, Member *client_member);
-
 /** Called to check if the channel of a user should be shown in WHOIS/WHO (function prototype for HOOKTYPE_SEE_CHANNEL_IN_WHOIS).
  * @param client		The client ASKING, eg doing the /WHOIS.
  * @param target		The client who is being interrogated
@@ -2292,7 +2297,7 @@ int hooktype_post_local_nickchange(Client *client, MessageTag *mtags, const char
  */
 int hooktype_post_remote_nickchange(Client *client, MessageTag *mtags, const char *oldnick);
 
-/** Called when user name or user host has changed.
+/** Called when user name or user host has changed (function prototype for HOOKTYPE_USERHOST_CHANGE).
  * @param client		The client whose user@host has changed
  * @param olduser		Old username of the client
  * @param oldhost		Old hostname of the client
@@ -2300,14 +2305,14 @@ int hooktype_post_remote_nickchange(Client *client, MessageTag *mtags, const cha
  */
 int hooktype_userhost_change(Client *client, const char *olduser, const char *oldhost);
 
-/** Called when user realname has changed.
+/** Called when user realname has changed.  (function prototype for HOOKTYPE_REALNAME_CHANGE).
  * @param client		The client whose realname has changed
  * @param oldinfo		Old realname of the client
  * @return The return value is ignored (use return 0)
  */
 int hooktype_realname_change(Client *client, const char *oldinfo);
 
-/** Called when changing IP (eg due to PROXY/WEBIRC/etc).
+/** Called when changing IP (eg due to PROXY/WEBIRC/etc) (function prototype for HOOKTYPE_IP_CHANGE).
  * @param client		The client whose IP has changed
  * @param oldip			Old IP of the client
  * @returns If you reject the user then use dead_link() and return HOOK_DENY
@@ -2316,7 +2321,7 @@ int hooktype_realname_change(Client *client, const char *oldinfo);
  */
 int hooktype_ip_change(Client *client, const char *oldip);
 
-/** Called when json_expand_client() is called.
+/** Called when json_expand_client() is called (function prototype for HOOKTYPE_JSON_EXPAND_CLIENT).
  * Used for expanding information about 'client' in logging routines.
  * @param client		The client that should be expanded
  * @param detail		The amount of detail to provide (always 0 at the moment)
@@ -2325,7 +2330,7 @@ int hooktype_ip_change(Client *client, const char *oldip);
  */
 int hooktype_json_expand_client(Client *client, int detail, json_t *j);
 
-/** Called when json_expand_client_user() is called.
+/** Called when json_expand_client_user() is called (function prototype for HOOKTYPE_JSON_EXPAND_CLIENT_USER).
  * Used for expanding information about 'client' in logging routines
  * when the client is a USER.
  * @param client		The client that should be expanded
@@ -2336,7 +2341,7 @@ int hooktype_json_expand_client(Client *client, int detail, json_t *j);
  */
 int hooktype_json_expand_client_user(Client *client, int detail, json_t *j, json_t *child);
 
-/** Called when json_expand_client_server() is called.
+/** Called when json_expand_client_server() is called (function prototype for HOOKTYPE_JSON_EXPAND_CLIENT_SERVER).
  * Used for expanding information about 'client' in logging routines
  * when the client is a SERVER.
  * @param client		The client that should be expanded
@@ -2347,7 +2352,7 @@ int hooktype_json_expand_client_user(Client *client, int detail, json_t *j, json
  */
 int hooktype_json_expand_client_server(Client *client, int detail, json_t *j, json_t *child);
 
-/** Called when json_expand_channel() is called.
+/** Called when json_expand_channel() is called (function prototype for HOOKTYPE_JSON_EXPAND_CHANNEL).
  * Used for expanding information about 'channel' in logging routines.
  * @param channel		The channel that should be expanded
  * @param detail		The amount of detail to provide (always 0 at the moment)
@@ -2366,29 +2371,28 @@ int hooktype_json_expand_channel(Channel *channel, int detail, json_t *j);
  */
 int hooktype_pre_local_handshake_timeout(Client *client, const char **comment);
 
-/** Called when a REHASH completed (either succesfully or with a failure).
- * This gives the full rehash log. Used by the JSON-RPC interface. (function prototype for HOOKTYPE_REHASH_LOG)
+/** Called when a REHASH completed (either succesfully or with a failure) (function prototype for HOOKTYPE_REHASH_LOG).
+ * This gives the full rehash log. Used by the JSON-RPC interface.
  * @param failure		Set to 1 if the rehash failed, otherwise 0.
  * @param t			The JSON object containing the rehash log and other information.
  * @return The return value is ignored (use return 0)
  */
 int hooktype_rehash_log(int failure, json_t *rehash_log);
 
-/** Called when DNS has been done for a client (or has not been done because it was skipped).
- * (function prototype for HOOKTYPE_DNS_FINISHED)
+/** Called when DNS has been done for a client (or has not been done because it was skipped)
+ * (function prototype for HOOKTYPE_DNS_FINISHED).
  * @param client		The client
  * @return The return value is ignored (use return 0)
  */
 int hooktype_dns_finished(Client *client);
 
-/** Called after an listener block is processed
- * (function prototype for HOOKTYPE_CONFIG_LISTENER)
+/** Called after an listener block is processed (function prototype for HOOKTYPE_CONFIG_LISTENER).
  * @param listener		The listener
  * @return The return value is ignored (use return 0)
  */
 int hooktype_config_listener(ConfigItem_listen *listener);
 
-/** Called after an entry is added to a WATCH (or MONITOR) list.
+/** Called after an entry is added to a WATCH (or MONITOR) list (function prototype for HOOKTYPE_WATCH_ADD).
  * @param nick	Name of the new entry (watched user's nick)
  * @param client	Owner of the watch list
  * @param flags	Flags for the entry (WATCH_FLAG_TYPE_*)
@@ -2396,7 +2400,7 @@ int hooktype_config_listener(ConfigItem_listen *listener);
  */
 int hooktype_watch_add(char *nick, Client *client, int flags);
 
-/** Called after an entry is removed from a WATCH (or MONITOR) list.
+/** Called after an entry is removed from a WATCH (or MONITOR) list (function prototype for HOOKTYPE_WATCH_DEL).
  * @param nick	Name of the entry (watched user's nick) to be deleted
  * @param client	Owner of the watch list
  * @param flags	Flags for the entry (WATCH_FLAG_TYPE_*) to be deleted
@@ -2404,7 +2408,8 @@ int hooktype_watch_add(char *nick, Client *client, int flags);
  */
 int hooktype_watch_del(char *nick, Client *client, int flags);
 
-/** Called when an user is notified about a MONITORed nick coming off- or online.
+/** Called when an user is notified about a MONITORed nick coming off- or online
+ * (function prototype for HOOKTYPE_MONITOR_NOTIFICATION).
  * @param watcher	The user being notified
  * @param client	The user (dis)appearing
  * @param online	1 if it's coming online, 0 otherwise
@@ -2412,7 +2417,8 @@ int hooktype_watch_del(char *nick, Client *client, int flags);
  */
 int hooktype_monitor_notification(Client *watcher, Client *client, int online);
 
-/** Called when an AUTHENTICATE command is sent by the client, for SASL authentication.
+/** Called when an AUTHENTICATE command is sent by the client, for SASL authentication
+ * (function prototype for HOOKTYPE_SASL_AUTHENTICATE).
  * This can be used by authentication modules.
  * @param client		The client (user)
  * @param first			Set to 1 if this is the first AUTHENTICATE, set to 0 if it is a continuation.
@@ -2426,6 +2432,54 @@ int hooktype_sasl_authenticate(Client *client, int first, const char *param);
  * @return The saslmechlist
  */
 const char *hooktype_sasl_mechs(Client *client);
+
+/** Called from AllowClient() to see if the client should be allowed in based
+ * on allow block restrictions (function prototype for HOOKTYPE_ALLOW_CLIENT).
+ * NOTE for 3rd party modules: usually you will want to use
+ * HOOKTYPE_PRE_LOCAL_CONNECT instead (or sometimes HOOKTYPE_IS_HANDSHAKE_FINISHED),
+ * as this HOOKTYPE_ALLOW_CLIENT is really meant for allow-block-specific stuff.
+ * @param client	The client
+ * @param aconf		The allow block being evaluated
+ * @return A string that will be used to exit_client() to reject the user,
+ * or NULL to allow the user in.
+ */
+const char *hooktype_allow_client(Client *client, ConfigItem_allow *aconf);
+
+/** Called from PRIVMSG/NOTICE to analyze properties of text-to-be-sent
+ * (function prototype for HOOKTYPE_ANALYZE_TEXT).
+ * @param client	The client
+ * @param text		The text that the user wants to send
+ * @param e		The result of the analysis
+ * @notes Since multiple modules can be called, 'e' may already contain data,
+ *        so don't blindly assume it is all zeroed (and don't zero everything either).
+ * @return The return value is ignored (use return 0)
+ */
+int hooktype_analyze_text(Client *client, const char *text, TextAnalysis *e);
+
+/** Called when a user wants to change their nick
+ * @param client		The client
+ * @param newnick		The new nick the user wants to change to
+ * @param reject_reason		The error string, sent to the client why the nick change is rejected.
+ * @retval HOOK_DENY		Deny the nick change, set *reject_reason to a reason why it is denied.
+ * @retval HOOK_CONTINUE 	Allow the nick change, unless blocked by something else.
+*/
+int hooktype_can_use_nick(Client *client, const char *newnick, const char **reject_reason);
+
+/** Called when a local user is banned, e.g. G-Lined.
+ * @param client	The client
+ * @param bantype	The ban type, such as: "K-Lined", "G-Lined" or "realname"
+ * @param reason	The specified reason
+ * @param global	Whether the ban is global (1) or for this server only (0)
+ * @notes This function is not called on /KILL (which is not a ban).
+ * @return The return value is ignored (use return 0)
+ */
+int hooktype_banned_client(Client *client, const char *bantype, const char *reason, int global);
+
+/** Called when a local user calls /MOTD, including on connect
+  * @param client	The client
+ */
+int hooktype_motd(Client *client);
+
 /** @} */
 
 #ifdef GCC_TYPECHECKING
@@ -2498,7 +2552,6 @@ _UNREAL_ERROR(_hook_error_incompatible, "Incompatible hook function. Check argum
         ((hooktype == HOOKTYPE_MODECHAR_ADD) && !ValidateHook(hooktype_modechar_add, func)) || \
         ((hooktype == HOOKTYPE_MODECHAR_DEL) && !ValidateHook(hooktype_modechar_del, func)) || \
         ((hooktype == HOOKTYPE_CAN_JOIN_LIMITEXCEEDED) && !ValidateHook(hooktype_can_join_limitexceeded, func)) || \
-        ((hooktype == HOOKTYPE_VISIBLE_IN_CHANNEL) && !ValidateHook(hooktype_visible_in_channel, func)) || \
         ((hooktype == HOOKTYPE_PRE_LOCAL_CHANMODE) && !ValidateHook(hooktype_pre_local_chanmode, func)) || \
         ((hooktype == HOOKTYPE_PRE_REMOTE_CHANMODE) && !ValidateHook(hooktype_pre_remote_chanmode, func)) || \
         ((hooktype == HOOKTYPE_JOIN_DATA) && !ValidateHook(hooktype_join_data, func)) || \
@@ -2553,7 +2606,12 @@ _UNREAL_ERROR(_hook_error_incompatible, "Incompatible hook function. Check argum
         ((hooktype == HOOKTYPE_WATCH_DEL) && !ValidateHook(hooktype_watch_del, func)) || \
         ((hooktype == HOOKTYPE_MONITOR_NOTIFICATION) && !ValidateHook(hooktype_monitor_notification, func)) || \
         ((hooktype == HOOKTYPE_SASL_AUTHENTICATE) && !ValidateHook(hooktype_sasl_authenticate, func)) || \
-        ((hooktype == HOOKTYPE_SASL_MECHS) && !ValidateHook(hooktype_sasl_mechs, func))) \
+        ((hooktype == HOOKTYPE_SASL_MECHS) && !ValidateHook(hooktype_sasl_mechs, func)) || \
+        ((hooktype == HOOKTYPE_ALLOW_CLIENT) && !ValidateHook(hooktype_allow_client, func)) || \
+        ((hooktype == HOOKTYPE_ANALYZE_TEXT) && !ValidateHook(hooktype_analyze_text, func)) || \
+        ((hooktype == HOOKTYPE_CAN_USE_NICK) && !ValidateHook(hooktype_can_use_nick, func)) || \
+        ((hooktype == HOOKTYPE_BANNED_CLIENT) && !ValidateHook(hooktype_banned_client, func)) || \
+        ((hooktype == HOOKTYPE_MOTD) && !ValidateHook(hooktype_motd, func))) \
         _hook_error_incompatible();
 #endif /* GCC_TYPECHECKING */
 
@@ -2719,6 +2777,12 @@ enum EfunctionType {
 	EFUNC_EXIT_CLIENT_EX,
 	EFUNC_BANNED_CLIENT,
 	EFUNC_UNREAL_EXPAND_STRING,
+	EFUNC_UTF8_CONVERT_CONFUSABLES,
+	EFUNC_UTF8_ANALYZE_TEXT,
+	EFUNC_UTF8_GET_BLOCK_NAME,
+	EFUNC_UTF8_GET_BLOCK_NUMBER,
+	EFUNC_SEND_ISUPPORT,
+	EFUNC_ISUPPORT_CHECK_FOR_CHANGES,
 };
 
 /* Module flags */
@@ -2745,6 +2809,8 @@ enum EfunctionType {
 #define CONFIG_LISTEN 10
 #define CONFIG_LISTEN_OPTIONS 11
 #define CONFIG_SET_HISTORY_CHANNEL 12
+#define CONFIG_ALLOW_BLOCK 13
+#define CONFIG_CLASS 14
 
 #define MOD_HEADER Mod_Header
 #define MOD_TEST() DLLFUNC int Mod_Test(ModuleInfo *modinfo)

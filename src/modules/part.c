@@ -91,7 +91,7 @@ CMD_FUNC(cmd_part)
 		}
 		if (commentx)
 		{
-			if (match_spamfilter(client, commentx, SPAMF_PART, "PART", parv[1], 0, NULL))
+			if (match_spamfilter(client, commentx, SPAMF_PART, "PART", parv[1], 0, clictx, NULL))
 				commentx = NULL;
 			if (IsDead(client))
 				return;
@@ -212,6 +212,6 @@ CMD_FUNC(cmd_part)
 
 		free_message_tags(mtags);
 
-		remove_user_from_channel(client, channel, 0);
+		remove_user_from_channel_withmb(client, channel, lp, 0);
 	}
 }

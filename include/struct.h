@@ -143,6 +143,7 @@ typedef struct RealCommand RealCommand;
 typedef struct CommandOverride CommandOverride;
 typedef struct Member Member;
 typedef struct Membership Membership;
+typedef struct LocalMember LocalMember;
 
 typedef struct OutgoingWebRequest OutgoingWebRequest;
 typedef struct OutgoingWebResponse OutgoingWebResponse;
@@ -209,6 +210,8 @@ typedef OperPermission (*OperClassEntryEvalCallback)(OperClassACLEntryVar* varia
 
 #define	USERHOST_REPLYLEN	(NICKLEN+HOSTLEN+USERLEN+5)
 
+#define ISUPPORTLEN BUFSIZE-HOSTLEN-NICKLEN-39
+
 /* NOTE: this must be down here so the stuff from struct.h IT uses works */
 #include "whowas.h"
 
@@ -249,6 +252,7 @@ typedef enum LogLevel {
 	ULOG_INVALID = 0,
 	ULOG_DEBUG = 1000,
 	ULOG_INFO = 2000,
+	ULOG_ADVICE = 2500,
 	ULOG_WARNING = 3000,
 	ULOG_ERROR = 4000,
 	ULOG_FATAL = 5000
@@ -290,11 +294,13 @@ struct Log {
 	int color;
 	int json_message_tag;
 	int oper_only;
+	/* for destination::webhook */
+	char *url;
 };
 
 /** This is used for deciding the <index> in logs[<index>] and temp_logs[<index>] */
-typedef enum LogDestination { LOG_DEST_SNOMASK=0, LOG_DEST_OPER=1, LOG_DEST_REMOTE=2, LOG_DEST_CHANNEL=3, LOG_DEST_DISK=4, LOG_DEST_MEMORY=5 } LogDestination;
-#define NUM_LOG_DESTINATIONS 6
+typedef enum LogDestination { LOG_DEST_SNOMASK=0, LOG_DEST_OPER=1, LOG_DEST_REMOTE=2, LOG_DEST_CHANNEL=3, LOG_DEST_DISK=4, LOG_DEST_MEMORY=5, LOG_DEST_WEBHOOK=6 } LogDestination;
+#define NUM_LOG_DESTINATIONS 7
 
 typedef struct LogEntry LogEntry;
 struct LogEntry {
@@ -606,7 +612,7 @@ typedef enum ClientStatus {
 #define GetHost(x)	(IsHidden(x) ? (x)->user->virthost : (x)->user->realhost)
 #define GetIP(x)	(x->ip ? x->ip : "255.255.255.255")
 #define IsLoggedIn(x)	(x->user && (*x->user->account != '*') && !isdigit(*x->user->account)) /**< Logged into services */
-#define IsSynched(x)	(x->server->flags.synced)
+#define IsSynched(x)	((x->server->flags.synced) && (x->direction->server->flags.synced))
 #define IsServerSent(x) (x->server && x->server->flags.server_sent)
 
 /* And more that access client stuff - but actually modularized */
@@ -799,6 +805,8 @@ struct NameList {
 
 /** Free an entire NameList */
 #define free_entire_name_list(list) do { _free_entire_name_list(list); list = NULL; } while(0)
+#define safe_free_name_list free_entire_name_list
+
 /** Add an entry to a NameList */
 #define add_name_list(list, str)  _add_name_list(&list, str)
 /** Delete an entry from a NameList - AND free it */
@@ -913,6 +921,23 @@ struct SWhois {
 	char *setby;
 };
 
+#define UNICODE_BLOCK_COUNT 339
+/** Text analysis by utf8_text_analysis() and other modules */
+typedef struct TextAnalysis {
+	int antimixedutf8_points;	/**< Points given by AntiMixedUTF8 */
+	int unicode_blocks;		/**< Number of different unicode blocks used in the text (low = normal, high = suspicious) */
+	int num_bytes;			/**< Number of bytes of the text */
+	int num_unicode_characters;	/**< Number of unicode characters (which is not the same as strlen) */
+	char unicode_blockmap[UNICODE_BLOCK_COUNT]; /**< Unicode block counts, eg unicode_blockmap[0] is the number of latin characters */
+	char deconfused[512];		/**< The string with accents removed, confusables handled. Not guaranteed to be 100% correct. */
+} TextAnalysis;
+
+/** Client context (passed in commands) */
+typedef struct ClientContext {
+	RealCommand *cmd; /**< Command handler (eg. cmd->command is the command name) */
+	TextAnalysis *textanalysis; /**< Analysis of text (can be NULL, eg for non-PRIVMSG/NOTICE or remote clients) */
+} ClientContext;
+
 /** The command API - used by modules and the core to add commands, overrides, etc.
  * See also https://www.unrealircd.org/docs/Dev:Command_API for a higher level overview and example.
  * @defgroup CommandAPI Command API
@@ -940,12 +965,15 @@ struct SWhois {
 #define CMD_CONTROL		0x0400
 /** Command is able to receive BIG lines */
 #define CMD_BIGLINES		0x0800
+/** The last parameter of the command should go through text analysis */
+#define CMD_TEXTANALYSIS	0x1000
 
 /** Command function - used by all command handlers.
  * This is used in the code like <pre>CMD_FUNC(cmd_yourcmd)</pre> as a function definition.
  * It allows UnrealIRCd devs to change the parameters in the function without
  * (necessarily) breaking your code.
- * @param client      The client
+ * @param clictx      The client context.
+ * @param client      The client.
  * @param recv_mtags  Received message tags for this command.
  * @param parc        Parameter count *plus* 1.
  * @param parv        Parameter values.
@@ -955,7 +983,7 @@ struct SWhois {
  *        Note that reading parv[parc] and beyond is OUT OF BOUNDS and will cause a crash.
  *        E.g. parv[3] in the above example is out of bounds.
  */
-#define CMD_FUNC(x) void (x) (Client *client, MessageTag *recv_mtags, int parc, const char *parv[])
+#define CMD_FUNC(x) void (x) (ClientContext *clictx, Client *client, MessageTag *recv_mtags, int parc, const char *parv[])
 
 /** Call a command function - can be useful if you are calling another command function in your own module.
  * For example in cmd_nick() we call cmd_nick_local() for local functions,
@@ -963,14 +991,14 @@ struct SWhois {
  * to bother with passing the right command arguments. Which is nice because
  * command arguments may change in future UnrealIRCd versions.
  */
-#define CALL_CMD_FUNC(x)	(x)(client, recv_mtags, parc, parv)
+#define CALL_CMD_FUNC(x)	(x)(clictx, client, recv_mtags, parc, parv)
 
 /** @} */
 
 /** Command override function - used by all command override handlers.
  * This is used in the code like <pre>CMD_OVERRIDE_FUNC(ovr_somecmd)</pre> as a function definition.
  * @param ovr         The command override structure.
- * @param cptr        The client direction pointer.
+ * @param clictx      The client context.
  * @param client        The source client pointer (you usually need this one).
  * @param recv_mtags  Received message tags for this command.
  * @param parc        Parameter count *plus* 1.
@@ -981,13 +1009,13 @@ struct SWhois {
  *        Note that reading parv[parc] and beyond is OUT OF BOUNDS and will cause a crash.
  *        E.g. parv[3] in the above example.
  */
-#define CMD_OVERRIDE_FUNC(x) void (x)(CommandOverride *ovr, Client *client, MessageTag *recv_mtags, int parc, const char *parv[])
+#define CMD_OVERRIDE_FUNC(x) void (x)(CommandOverride *ovr, ClientContext *clictx, Client *client, MessageTag *recv_mtags, int parc, const char *parv[])
 
 
 
-typedef void (*CmdFunc)(Client *client, MessageTag *mtags, int parc, const char *parv[]);
-typedef void (*AliasCmdFunc)(Client *client, MessageTag *mtags, int parc, const char *parv[], const char *cmd);
-typedef void (*OverrideCmdFunc)(CommandOverride *ovr, Client *client, MessageTag *mtags, int parc, const char *parv[]);
+typedef void (*CmdFunc)(ClientContext *clictx, Client *client, MessageTag *mtags, int parc, const char *parv[]);
+typedef void (*AliasCmdFunc)(ClientContext *clictx, Client *client, MessageTag *mtags, int parc, const char *parv[], const char *cmd);
+typedef void (*OverrideCmdFunc)(CommandOverride *ovr, ClientContext *clictx, Client *client, MessageTag *mtags, int parc, const char *parv[]);
 
 #include <sodium.h>
 
@@ -1096,6 +1124,7 @@ struct crule_context
 	Client *client;			/**< Client that is being processed (can be NULL) */
 	const char *text;		/**< The input string, if any (can be NULL) */
 	const char *destination;	/**< Destination of the message, like '#xyz' for spamfilter (can be NULL, eg for 'u') */
+	ClientContext *clictx;		/**< Client context (can be NULL)  */
 };
 
 /** Evaluation function for a connection rule. */
@@ -1222,6 +1251,12 @@ struct BanAction {
 /** Don't ban/kill/block/etc, but do return value as if we did */
 #define TAKE_ACTION_SIMULATE_USER_ACTION	0x2
 
+typedef enum SpamfilterShowMessageContentOnHit {
+	SPAMFILTER_SHOW_MESSAGE_CONTENT_ON_HIT_ALWAYS = 1,
+	SPAMFILTER_SHOW_MESSAGE_CONTENT_ON_HIT_CHANNEL_ONLY = 2,
+	SPAMFILTER_SHOW_MESSAGE_CONTENT_ON_HIT_NEVER = 3,
+} SpamfilterShowMessageContentOnHit;
+
 /** Server ban sub-struct of TKL entry (KLINE/GLINE/ZLINE/GZLINE/SHUN) */
 struct ServerBan {
 	char *usermask; /**< User mask (can be NULL if 'match' is non-NULL) */
@@ -1238,6 +1273,10 @@ struct NameBan {
 	char *reason; /**< Reason */
 };
 
+#define INPUT_CONVERSION_STRIP_CONTROL_CODES	0x1
+#define INPUT_CONVERSION_DEFAULT		(INPUT_CONVERSION_STRIP_CONTROL_CODES)
+#define INPUT_CONVERSION_CONFUSABLES		0x2
+
 /** Spamfilter sub-struct of TKL entry (Spamfilter) */
 struct Spamfilter {
 	unsigned short target;
@@ -1250,7 +1289,12 @@ struct Spamfilter {
 	char *id; /**< ID */
 	long long hits; /**< Spamfilter hits (except exempts) */
 	long long hits_except; /**< Spamfilter hits by exempt clients */
-	SecurityGroup *except; /**< Don't run this spamfitler at all for these users (not counting towards hits_except btw) */
+	SecurityGroup *except; /**< Don't run this spamfilter at all for these users (not counting towards hits_except btw) */
+	int input_conversion;	/**< How we should handle the input */
+	/** For overriding set::spamfilter::show-message-content-on-hit
+	 * (0 means use default, so iConf.spamfilter_show_message_content_on_hit)
+	 */
+	SpamfilterShowMessageContentOnHit show_message_content_on_hit;
 };
 
 /** Ban exception sub-struct of TKL entry (ELINE) */
@@ -1291,12 +1335,6 @@ struct SpamExcept {
 	SpamExcept *prev, *next;
 	char name[1];
 };
-
-typedef enum SpamfilterShowMessageContentOnHit {
-	SPAMFILTER_SHOW_MESSAGE_CONTENT_ON_HIT_ALWAYS = 1,
-	SPAMFILTER_SHOW_MESSAGE_CONTENT_ON_HIT_CHANNEL_ONLY = 2,
-	SPAMFILTER_SHOW_MESSAGE_CONTENT_ON_HIT_NEVER = 3,
-} SpamfilterShowMessageContentOnHit;
 
 /** IRC Counts, used for /LUSERS */
 typedef struct IRCCounts IRCCounts;
@@ -1383,6 +1421,7 @@ extern void moddata_init(void);
 extern ModDataInfo *ModDataAdd(Module *module, ModDataInfo req);
 extern void ModDataDel(ModDataInfo *md);
 extern void unload_all_unused_moddata(void);
+extern void moddatatype_dump(Client *client);
 
 #define LISTENER_NORMAL			0x000001
 #define LISTENER_CLIENTSONLY		0x000002
@@ -1396,10 +1435,12 @@ extern void unload_all_unused_moddata(void);
 
 #define IsServersOnlyListener(x)	((x) && ((x)->options & LISTENER_SERVERSONLY))
 
-#define CONNECT_TLS		0x000001
-#define CONNECT_AUTO		0x000002
-#define CONNECT_QUARANTINE	0x000004
-#define CONNECT_INSECURE	0x000008
+#define CONNECT_OUTGOING_TLS		0x000001
+#define CONNECT_OUTGOING_AUTO		0x000002
+#define CONNECT_OUTGOING_INSECURE	0x000008
+
+#define CONNECT_QUARANTINE			0x000001
+#define CONNECT_NO_CERTIFICATE_VERIFICATION	0x000002
 
 #define TLSFLAG_FAILIFNOCERT 		0x0001
 #define TLSFLAG_NOSTARTTLS		0x0002
@@ -1487,7 +1528,7 @@ struct LocalClient {
 	dbuf recvQ;			/**< Incoming receive queue (incoming data yet to be parsed) */
 	ConfigItem_class *class;	/**< The class { } block associated to this client */
 	int proto;			/**< PROTOCTL options */
-	long caps;			/**< User: enabled capabilities (via CAP command) */
+	uint64_t caps;			/**< User: enabled capabilities (via CAP command) */
 	time_t nexttarget;		/**< Next time that a new target will be allowed (msg/notice/invite) */
 	u_char targets[MAXCCUSERS];	/**< Hash values of targets for target limiting */
 	ConfigItem_listen *listener;	/**< If this client IsListening() then this is the listener configuration attached to it */
@@ -1508,7 +1549,6 @@ struct LocalClient {
 	int identbufcnt;		/**< Counter for 'ident' reading code */
 	struct hostent *hostp;		/**< Host record for this client (used by DNS code) */
 	char sockhost[HOSTLEN + 1];	/**< Hostname from the socket */
-	u_short port;			/**< Remote TCP port of client */
 	FloodCounter flood[MAXFLOODOPTIONS];
 	RPCClient *rpc;			/**< RPC Client, or NULL */
 	Tag *tags;			/**< Tags from spamfilter */
@@ -1602,6 +1642,7 @@ typedef struct AuthConfig AuthConfig;
  * configuration file.
  */
 struct AuthConfig {
+	AuthConfig		*prev, *next;
 	AuthenticationType	type;  /**< Type of data, one of AUTHTYPE_* */
 	char			*data; /**< Data associated with this record */
 };
@@ -1817,13 +1858,14 @@ struct ConfigItem_oper {
  */
 typedef struct TLSOptions TLSOptions;
 struct TLSOptions {
-	char *certificate_file;
-	char *key_file;
+	NameList *certificate_files;
+	NameList *key_files;
 	char *trusted_ca_file;
 	unsigned int protocols;
 	char *ciphers;
 	char *ciphersuites;
-	char *ecdh_curves;
+	char *groups;
+	char *signature_algorithms;
 	char *outdated_protocols;
 	char *outdated_ciphers;
 	long options;
@@ -1916,9 +1958,10 @@ struct OutgoingWebRequest
 	int keep_file; /**< Normally, if store_in_file is set to 1, the downloaded file is deleted after the callback function was called. If you set this to 1 then the file is not removed. */
 	int connect_timeout; /**< How many seconds to wait for the (TLS) connect to succeed */
 	int transfer_timeout; /**< How many seconds the total transfer may take (connect+reading everything) */
-	// If you are adding allocated fields here:
+	int minimum_tls_version;
+	// If you are adding fields here:
 	// 1) update duplicate_outgoingwebrequest() in src/misc.c
-	// 2) and update free_outgoingwebrequest() there as well
+	// 2) and update free_outgoingwebrequest() there as well (if something needs to be freed)
 };
 
 /** The result of an HTTP(S) call, such as the downloaded file, error, etc. */
@@ -2211,6 +2254,7 @@ struct SecurityGroup {
 	int tls;
 	NameList *ip;
 	ConfigItem_mask *mask;
+	NameList *server_port;
 	NameList *security_group;
 	char *prettyrule; /* ::rule as a string */
 	CRuleNode *rule; /**< parsed crule */
@@ -2225,6 +2269,7 @@ struct SecurityGroup {
 	int exclude_tls;
 	NameList *exclude_ip;
 	ConfigItem_mask *exclude_mask;
+	NameList *exclude_server_port;
 	NameList *exclude_security_group;
 	char *exclude_prettyrule; /* ::exclude-rule as a string */
 	CRuleNode *exclude_rule; /**< parsed crule */
@@ -2349,6 +2394,7 @@ struct Channel {
 	time_t topic_time;			/**< Time at which the topic was last set */
 	int users;				/**< Number of users in the channel */
 	Member *members;			/**< List of channel members (users in the channel) */
+	LocalMember *local_members;		/**< List of channel members (users in the channel) */
 	Ban *banlist;				/**< List of bans (+b) */
 	Ban *exlist;				/**< List of ban exceptions (+e) */
 	Ban *invexlist;				/**< List of invite exceptions (+I) */
@@ -2357,6 +2403,8 @@ struct Channel {
 	char name[CHANNELLEN+1];		/**< Channel name */
 };
 
+#define MEMB_FLAG_INVISIBLE	0x1
+
 /** user/channel member struct (channel->members).
  * This is Member which is used in the linked list channel->members for each channel.
  * There is also Membership which is used in client->user->channels (see Membership for that).
@@ -2364,10 +2412,13 @@ struct Channel {
  */
 struct Member
 {
-	struct Member *next;				/**< Next entry in list */
+	struct Member *prev, *next;			/**< Previous and next entry in list */
 	Client	      *client;				/**< The client */
 	char member_modes[MEMBERMODESLEN];		/**< The access of the user on this channel (eg "vhoqa") */
-	ModData moddata[MODDATA_MAX_MEMBER];		/** Member attached module data, used by the ModData system */
+	Membership *related;				/**< The related Membership item */
+	LocalMember *local_member;
+	ModData moddata[MODDATA_MAX_MEMBER];		/**< Member attached module data, used by the ModData system */
+	int memb_flags;					/**< Special member flags (currently only MEMB_FLAG_INVISIBLE) */
 };
 
 /** user/channel membership struct (client->user->channels).
@@ -2377,10 +2428,22 @@ struct Member
  */
 struct Membership
 {
-	struct Membership 	*next;			/**< Next entry in list */
-	struct Channel		*channel;			/**< The channel */
+	struct Membership 	*prev, *next;		/**< Previous and next entry in list */
+	struct Channel		*channel;		/**< The channel */
 	char member_modes[MEMBERMODESLEN];		/**< The (new) access of the user on this channel (eg "vhoqa") */
+	Member *related;				/**< The related Member item */
 	ModData moddata[MODDATA_MAX_MEMBERSHIP];	/**< Membership attached module data, used by the ModData system */
+	int memb_flags;					/**< Special member flags (currently only MEMB_FLAG_INVISIBLE) */
+};
+
+/** This is used for channel->local_members.
+ * We use these local members for fast local sending,
+ * and channel->members everywhere else.
+ */
+struct LocalMember
+{
+	struct LocalMember *prev, *next;
+	Member *ptr;
 };
 
 /** @} */

@@ -56,7 +56,7 @@ MOD_TEST()
 MOD_INIT()
 {
 	MARK_AS_OFFICIAL_MODULE(modinfo);
-	CommandAdd(modinfo->handle, MSG_QUIT, cmd_quit, 1, CMD_UNREGISTERED|CMD_USER|CMD_VIRUS);
+	CommandAdd(modinfo->handle, MSG_QUIT, cmd_quit, 1, CMD_UNREGISTERED|CMD_USER|CMD_VIRUS|CMD_TEXTANALYSIS);
 	return MOD_SUCCESS;
 }
 
@@ -106,7 +106,7 @@ CMD_FUNC(cmd_quit)
 			return;
 		}
 
-		if (match_spamfilter(client, comment, SPAMF_QUIT, "QUIT", NULL, 0, NULL))
+		if (match_spamfilter(client, comment, SPAMF_QUIT, "QUIT", NULL, 0, clictx, NULL))
 		{
 			comment = client->name;
 			if (IsDead(client))
@@ -451,7 +451,7 @@ static void exit_one_client(Client *client, MessageTag *mtags_i, const char *com
 		free_message_tags(mtags_o);
 
 		while ((mp = client->user->channel))
-			remove_user_from_channel(client, mp->channel, 1);
+			remove_user_from_channel_withmb(client, mp->channel, mp, 1);
 		/* again, this is all that is needed */
 
 		/* For remote clients, we need to check for any outstanding async
@@ -500,6 +500,8 @@ void _banned_client(Client *client, const char *bantype, const char *reason, int
 
 	if (!MyConnect(client))
 		abort();
+
+	RunHook(HOOKTYPE_BANNED_CLIENT, client, bantype, reason, global);
 
 	/* This was: "You are not welcome on this %s. %s: %s. %s" but is now dynamic: */
 	vars[0] = "bantype";

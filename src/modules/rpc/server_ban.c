@@ -228,7 +228,7 @@ RPC_CALL_FUNC(rpc_server_ban_del)
 
 	OPTIONAL_PARAM_STRING("set_by", set_by);
 	if (!set_by)
-		set_by = client->name;
+		set_by = client->rpc->issuer ? client->rpc->issuer : client->name;
 
 	result = json_object();
 	json_expand_tkl(result, "tkl", tkl, 1);
@@ -248,7 +248,7 @@ RPC_CALL_FUNC(rpc_server_ban_del)
 	tkllayer[4] = hostmask;
 	tkllayer[5] = set_by;
 	tkllayer[6] = NULL;
-	cmd_tkl(&me, NULL, 6, tkllayer);
+	cmd_tkl(NULL, &me, NULL, 6, tkllayer);
 
 	if (!find_tkl_serverban(tkl_type_int, usermask, hostmask, soft))
 	{
@@ -309,7 +309,7 @@ RPC_CALL_FUNC(rpc_server_ban_add)
 
 	OPTIONAL_PARAM_STRING("set_by", set_by);
 	if (!set_by)
-		set_by = client->name;
+		set_by = client->rpc->issuer ? client->rpc->issuer : client->name;
 
 	if ((tkl_expire_at != 0) && (tkl_expire_at < TStime()))
 	{
